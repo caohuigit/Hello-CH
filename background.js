@@ -67,46 +67,72 @@ async function captureFullPage(tabId) {
   const totalSteps = Math.ceil(scrollHeight / viewportHeight);
   const screenshots = [];
 
+  // First, scroll to top and wait for initial render
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      window.scrollTo(0, 0);
+    },
+  });
+  await delay(300);
+
   for (let i = 0; i < totalSteps; i++) {
     const targetScrollY = i * viewportHeight;
 
-    // Scroll to position and get actual scroll position
-    const [{ result: actualScrollY }] = await chrome.scripting.executeScript({
+    // Scroll to target position, then wait for TWO animation frames
+    // to guarantee the browser has fully painted the new scroll position.
+    // Without this, captureVisibleTab captures stale (pre-scroll) pixels.
+    await chrome.scripting.executeScript({
       target: { tabId },
       func: (y) => {
-        window.scrollTo(0, y);
-        return window.scrollY;
+        return new Promise((resolve) => {
+          window.scrollTo(0, y);
+          // First rAF: browser schedules repaint
+          requestAnimationFrame(() => {
+            // Second rAF: repaint has been committed to screen
+            requestAnimationFrame(() => {
+              resolve(window.scrollY);
+            });
+          });
+        });
       },
       args: [targetScrollY],
     });
 
-    // Wait for page to render after scroll
-    await delay(400);
+    // Additional safety delay for heavy pages (images, lazy-load, etc.)
+    await delay(350);
 
-    // Verify scroll position (some pages need more time)
+    // Verify scroll actually happened; retry if needed
     const [{ result: confirmedScrollY }] =
       await chrome.scripting.executeScript({
         target: { tabId },
         func: () => window.scrollY,
       });
 
-    // If scroll didn't reach target, wait longer and try again
     if (
       i > 0 &&
       Math.abs(confirmedScrollY - targetScrollY) > 2 &&
       targetScrollY <= scrollHeight - viewportHeight
     ) {
+      // Retry scroll with longer wait
       await chrome.scripting.executeScript({
         target: { tabId },
         func: (y) => {
-          window.scrollTo(0, y);
+          return new Promise((resolve) => {
+            window.scrollTo(0, y);
+            requestAnimationFrame(() => {
+              requestAnimationFrame(() => {
+                resolve();
+              });
+            });
+          });
         },
         args: [targetScrollY],
       });
-      await delay(600);
+      await delay(500);
     }
 
-    // Capture visible tab
+    // NOW capture — the screen has definitely been repainted
     const dataUrl = await chrome.tabs.captureVisibleTab(null, {
       format: "png",
     });
