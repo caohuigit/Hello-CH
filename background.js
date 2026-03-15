@@ -42,50 +42,90 @@ function delay(ms) {
 }
 
 async function captureFullPage(tabId) {
-  // Step 1: Inject style overrides and measure page
-  // - Force scroll-behavior: auto so scrollTo jumps instantly
-  // - Temporarily remove overflow: hidden on html/body that hides content
-  const [{ result: pageInfo }] = await chrome.scripting.executeScript({
+  // ---------------------------------------------------------------
+  // STEP 1: Inject persistent CSS overrides that stay active for the
+  //         entire capture process. This fixes two critical issues:
+  //   a) overflow:hidden on html/body → scrollHeight === clientHeight
+  //   b) scroll-behavior:smooth → scrollTo animates instead of jumping
+  //
+  //   We also save original inline styles so we can restore later.
+  // ---------------------------------------------------------------
+  const [{ result: setupResult }] = await chrome.scripting.executeScript({
     target: { tabId },
     func: () => {
-      // Inject style to disable smooth scrolling globally
+      const html = document.documentElement;
+      const body = document.body;
+
+      // Save original inline styles for later restoration
+      const saved = {
+        htmlOverflow: html.style.overflow,
+        htmlOverflowY: html.style.overflowY,
+        bodyOverflow: body.style.overflow,
+        bodyOverflowY: body.style.overflowY,
+      };
+
+      // Inject a <style> that forces scrolling to work.
+      // Using a <style> tag with !important beats any CSS rules on the page.
       let styleEl = document.getElementById("__scroll_capture_style__");
       if (!styleEl) {
         styleEl = document.createElement("style");
         styleEl.id = "__scroll_capture_style__";
         document.head.appendChild(styleEl);
       }
-      styleEl.textContent =
-        "html, body, * { scroll-behavior: auto !important; }";
-
-      // Some sites set overflow:hidden on html/body, preventing scroll
-      // and causing scrollHeight === clientHeight. Temporarily override.
-      const html = document.documentElement;
-      const body = document.body;
-      const htmlOverflow = html.style.overflow;
-      const bodyOverflow = body.style.overflow;
-      html.style.setProperty("overflow", "visible", "important");
-      body.style.setProperty("overflow", "visible", "important");
-
-      // Force layout recalc
-      void html.offsetHeight;
-
-      const scrollHeight = Math.max(
-        html.scrollHeight,
-        body.scrollHeight,
-        html.offsetHeight,
-        body.offsetHeight
-      );
-
-      // Restore overflow (the page still needs to scroll normally)
-      html.style.overflow = htmlOverflow;
-      body.style.overflow = bodyOverflow;
+      styleEl.textContent = [
+        "html, body {",
+        "  overflow-y: auto !important;",
+        "  overflow-x: hidden !important;",
+        "  scroll-behavior: auto !important;",
+        "}",
+        // Some pages set height:100vh on html/body, which caps scrollHeight
+        "html { height: auto !important; min-height: 100vh !important; }",
+        "body { height: auto !important; min-height: 100vh !important; }",
+        // Disable smooth scrolling on all elements
+        "* { scroll-behavior: auto !important; }",
+      ].join("\n");
 
       // Scroll to top
       window.scrollTo(0, 0);
 
+      return saved;
+    },
+  });
+
+  // Let the CSS override take effect and layout recalculate
+  await delay(500);
+
+  // ---------------------------------------------------------------
+  // STEP 2: Measure page height AFTER the CSS override is active.
+  //         Use multiple methods and take the maximum.
+  // ---------------------------------------------------------------
+  const [{ result: pageInfo }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      const html = document.documentElement;
+      const body = document.body;
+
+      // Method 1: standard scrollHeight / offsetHeight
+      let maxHeight = Math.max(
+        html.scrollHeight,
+        html.offsetHeight,
+        body.scrollHeight,
+        body.offsetHeight
+      );
+
+      // Method 2: scan top-level body children for their actual bottom edge.
+      // This catches cases where scrollHeight is still capped.
+      const children = body.children;
+      for (let i = 0; i < children.length; i++) {
+        const rect = children[i].getBoundingClientRect();
+        const bottom = rect.bottom + window.scrollY;
+        if (bottom > maxHeight) {
+          maxHeight = bottom;
+        }
+      }
+
       return {
-        scrollHeight: scrollHeight,
+        scrollHeight: Math.ceil(maxHeight),
         viewportHeight: window.innerHeight,
         viewportWidth: window.innerWidth,
         devicePixelRatio: window.devicePixelRatio || 1,
@@ -101,67 +141,58 @@ async function captureFullPage(tabId) {
   let totalSteps = Math.ceil(scrollHeight / viewportHeight);
   const screenshots = [];
 
-  // Wait for scroll-to-top to render
-  await delay(500);
-
+  // ---------------------------------------------------------------
+  // STEP 3: Capture loop — scroll, wait, capture, extract text
+  // ---------------------------------------------------------------
   for (let i = 0; i < totalSteps; i++) {
     const targetScrollY = i * viewportHeight;
 
     // --- SCROLL ---
-    // Use simple synchronous scroll (no Promise/rAF tricks that may be flaky).
-    // The injected CSS ensures scroll-behavior is 'auto', so scrollTo is instant.
     await chrome.scripting.executeScript({
       target: { tabId },
       func: (y) => {
-        // Belt and suspenders: set scrollTop on both html and body,
-        // plus window.scrollTo, to cover all page configurations.
         window.scrollTo(0, y);
         document.documentElement.scrollTop = y;
-        document.body.scrollTop = y; // for quirks mode / WebKit
+        document.body.scrollTop = y;
       },
       args: [targetScrollY],
     });
 
-    // --- WAIT FOR REPAINT ---
-    // Generous fixed delay; the CSS override guarantees the scroll is instant,
-    // so this only needs to cover repaint + lazy image loading.
+    // Wait for repaint
     await delay(600);
 
-    // --- VERIFY SCROLL POSITION + RE-MEASURE HEIGHT ---
+    // --- VERIFY + RE-MEASURE ---
     const [{ result: scrollState }] = await chrome.scripting.executeScript({
       target: { tabId },
       func: () => {
-        // Re-measure height (content may have grown from lazy loading)
         const html = document.documentElement;
         const body = document.body;
-        const htmlOv = html.style.overflow;
-        const bodyOv = body.style.overflow;
-        html.style.setProperty("overflow", "visible", "important");
-        body.style.setProperty("overflow", "visible", "important");
-        void html.offsetHeight;
-        const h = Math.max(
+        let h = Math.max(
           html.scrollHeight,
-          body.scrollHeight,
           html.offsetHeight,
+          body.scrollHeight,
           body.offsetHeight
         );
-        html.style.overflow = htmlOv;
-        body.style.overflow = bodyOv;
-
+        const children = body.children;
+        for (let i = 0; i < children.length; i++) {
+          const rect = children[i].getBoundingClientRect();
+          const bottom = rect.bottom + window.scrollY;
+          if (bottom > h) h = bottom;
+        }
         return {
-          scrollY: window.scrollY || document.documentElement.scrollTop,
-          scrollHeight: h,
+          scrollY: window.scrollY || html.scrollTop || body.scrollTop,
+          scrollHeight: Math.ceil(h),
         };
       },
     });
 
-    // If page grew (lazy loading / infinite scroll), update totalSteps
+    // If page grew (lazy loading), update totalSteps
     if (scrollState.scrollHeight > scrollHeight) {
       scrollHeight = scrollState.scrollHeight;
       totalSteps = Math.ceil(scrollHeight / viewportHeight);
     }
 
-    // If scroll didn't reach target, retry with a different method
+    // If scroll didn't reach target, retry
     if (
       i > 0 &&
       Math.abs(scrollState.scrollY - targetScrollY) > 5 &&
@@ -184,7 +215,6 @@ async function captureFullPage(tabId) {
       format: "png",
     });
 
-    // Small delay between capture and next scroll to avoid pipeline stalls
     await delay(100);
 
     // --- EXTRACT TEXT for dual-layer PDF ---
@@ -296,14 +326,27 @@ async function captureFullPage(tabId) {
     }
   }
 
-  // Clean up: remove injected style, scroll back to top
+  // ---------------------------------------------------------------
+  // STEP 4: Cleanup — remove injected CSS, restore styles, scroll top
+  // ---------------------------------------------------------------
   await chrome.scripting.executeScript({
     target: { tabId },
-    func: () => {
+    func: (saved) => {
+      // Remove the injected <style>
       const s = document.getElementById("__scroll_capture_style__");
       if (s) s.remove();
+
+      // Restore original inline styles
+      const html = document.documentElement;
+      const body = document.body;
+      html.style.overflow = saved.htmlOverflow;
+      html.style.overflowY = saved.htmlOverflowY;
+      body.style.overflow = saved.bodyOverflow;
+      body.style.overflowY = saved.bodyOverflowY;
+
       window.scrollTo(0, 0);
     },
+    args: [setupResult],
   });
 
   // Store captured data
