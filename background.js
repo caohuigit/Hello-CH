@@ -42,15 +42,50 @@ function delay(ms) {
 }
 
 async function captureFullPage(tabId) {
-  // Get page info
+  // Step 1: Inject style overrides and measure page
+  // - Force scroll-behavior: auto so scrollTo jumps instantly
+  // - Temporarily remove overflow: hidden on html/body that hides content
   const [{ result: pageInfo }] = await chrome.scripting.executeScript({
     target: { tabId },
     func: () => {
+      // Inject style to disable smooth scrolling globally
+      let styleEl = document.getElementById("__scroll_capture_style__");
+      if (!styleEl) {
+        styleEl = document.createElement("style");
+        styleEl.id = "__scroll_capture_style__";
+        document.head.appendChild(styleEl);
+      }
+      styleEl.textContent =
+        "html, body, * { scroll-behavior: auto !important; }";
+
+      // Some sites set overflow:hidden on html/body, preventing scroll
+      // and causing scrollHeight === clientHeight. Temporarily override.
+      const html = document.documentElement;
+      const body = document.body;
+      const htmlOverflow = html.style.overflow;
+      const bodyOverflow = body.style.overflow;
+      html.style.setProperty("overflow", "visible", "important");
+      body.style.setProperty("overflow", "visible", "important");
+
+      // Force layout recalc
+      void html.offsetHeight;
+
+      const scrollHeight = Math.max(
+        html.scrollHeight,
+        body.scrollHeight,
+        html.offsetHeight,
+        body.offsetHeight
+      );
+
+      // Restore overflow (the page still needs to scroll normally)
+      html.style.overflow = htmlOverflow;
+      body.style.overflow = bodyOverflow;
+
+      // Scroll to top
+      window.scrollTo(0, 0);
+
       return {
-        scrollHeight: Math.max(
-          document.documentElement.scrollHeight,
-          document.body.scrollHeight
-        ),
+        scrollHeight: scrollHeight,
         viewportHeight: window.innerHeight,
         viewportWidth: window.innerWidth,
         devicePixelRatio: window.devicePixelRatio || 1,
@@ -58,86 +93,101 @@ async function captureFullPage(tabId) {
     },
   });
 
-  // Get page title
   const tab = await chrome.tabs.get(tabId);
   const title = tab.title || "screenshot";
 
-  const { scrollHeight, viewportHeight, viewportWidth, devicePixelRatio } =
-    pageInfo;
-  const totalSteps = Math.ceil(scrollHeight / viewportHeight);
+  const { viewportHeight, viewportWidth, devicePixelRatio } = pageInfo;
+  let scrollHeight = pageInfo.scrollHeight;
+  let totalSteps = Math.ceil(scrollHeight / viewportHeight);
   const screenshots = [];
 
-  // First, scroll to top and wait for initial render
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    func: () => {
-      window.scrollTo(0, 0);
-    },
-  });
-  await delay(300);
+  // Wait for scroll-to-top to render
+  await delay(500);
 
   for (let i = 0; i < totalSteps; i++) {
     const targetScrollY = i * viewportHeight;
 
-    // Scroll to target position, then wait for TWO animation frames
-    // to guarantee the browser has fully painted the new scroll position.
-    // Without this, captureVisibleTab captures stale (pre-scroll) pixels.
+    // --- SCROLL ---
+    // Use simple synchronous scroll (no Promise/rAF tricks that may be flaky).
+    // The injected CSS ensures scroll-behavior is 'auto', so scrollTo is instant.
     await chrome.scripting.executeScript({
       target: { tabId },
       func: (y) => {
-        return new Promise((resolve) => {
-          window.scrollTo(0, y);
-          // First rAF: browser schedules repaint
-          requestAnimationFrame(() => {
-            // Second rAF: repaint has been committed to screen
-            requestAnimationFrame(() => {
-              resolve(window.scrollY);
-            });
-          });
-        });
+        // Belt and suspenders: set scrollTop on both html and body,
+        // plus window.scrollTo, to cover all page configurations.
+        window.scrollTo(0, y);
+        document.documentElement.scrollTop = y;
+        document.body.scrollTop = y; // for quirks mode / WebKit
       },
       args: [targetScrollY],
     });
 
-    // Additional safety delay for heavy pages (images, lazy-load, etc.)
-    await delay(350);
+    // --- WAIT FOR REPAINT ---
+    // Generous fixed delay; the CSS override guarantees the scroll is instant,
+    // so this only needs to cover repaint + lazy image loading.
+    await delay(600);
 
-    // Verify scroll actually happened; retry if needed
-    const [{ result: confirmedScrollY }] =
-      await chrome.scripting.executeScript({
-        target: { tabId },
-        func: () => window.scrollY,
-      });
+    // --- VERIFY SCROLL POSITION + RE-MEASURE HEIGHT ---
+    const [{ result: scrollState }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        // Re-measure height (content may have grown from lazy loading)
+        const html = document.documentElement;
+        const body = document.body;
+        const htmlOv = html.style.overflow;
+        const bodyOv = body.style.overflow;
+        html.style.setProperty("overflow", "visible", "important");
+        body.style.setProperty("overflow", "visible", "important");
+        void html.offsetHeight;
+        const h = Math.max(
+          html.scrollHeight,
+          body.scrollHeight,
+          html.offsetHeight,
+          body.offsetHeight
+        );
+        html.style.overflow = htmlOv;
+        body.style.overflow = bodyOv;
 
+        return {
+          scrollY: window.scrollY || document.documentElement.scrollTop,
+          scrollHeight: h,
+        };
+      },
+    });
+
+    // If page grew (lazy loading / infinite scroll), update totalSteps
+    if (scrollState.scrollHeight > scrollHeight) {
+      scrollHeight = scrollState.scrollHeight;
+      totalSteps = Math.ceil(scrollHeight / viewportHeight);
+    }
+
+    // If scroll didn't reach target, retry with a different method
     if (
       i > 0 &&
-      Math.abs(confirmedScrollY - targetScrollY) > 2 &&
+      Math.abs(scrollState.scrollY - targetScrollY) > 5 &&
       targetScrollY <= scrollHeight - viewportHeight
     ) {
-      // Retry scroll with longer wait
       await chrome.scripting.executeScript({
         target: { tabId },
         func: (y) => {
-          return new Promise((resolve) => {
-            window.scrollTo(0, y);
-            requestAnimationFrame(() => {
-              requestAnimationFrame(() => {
-                resolve();
-              });
-            });
-          });
+          document.documentElement.scrollTop = y;
+          document.body.scrollTop = y;
+          window.scrollTo(0, y);
         },
         args: [targetScrollY],
       });
-      await delay(500);
+      await delay(600);
     }
 
-    // NOW capture — the screen has definitely been repainted
+    // --- CAPTURE ---
     const dataUrl = await chrome.tabs.captureVisibleTab(null, {
       format: "png",
     });
 
-    // Extract visible text with positions for dual-layer PDF
+    // Small delay between capture and next scroll to avoid pipeline stalls
+    await delay(100);
+
+    // --- EXTRACT TEXT for dual-layer PDF ---
     let textData = [];
     try {
       const [{ result }] = await chrome.scripting.executeScript({
@@ -179,13 +229,10 @@ async function captureFullPage(tabId) {
             const el = node.parentElement;
             const fontSize = parseFloat(getComputedStyle(el).fontSize);
 
-            // Use each client rect as a separate text line
             for (const rect of rects) {
               if (rect.width < 1 || rect.height < 1) continue;
               if (rect.bottom < 0 || rect.top > vh) continue;
 
-              // Approximate the text content for this rect line
-              // For multi-line text, distribute chars proportionally
               const charPerRect = Math.max(
                 1,
                 Math.round(text.length / rects.length)
@@ -214,16 +261,14 @@ async function captureFullPage(tabId) {
       console.warn("Text extraction failed for step", i, e);
     }
 
-    // Calculate crop info for the last screenshot
+    // --- CROP INFO for last screenshot ---
     const isLast = i === totalSteps - 1;
     let cropInfo = null;
 
     if (isLast && totalSteps > 1) {
-      const expectedScrollY = targetScrollY;
       const maxScrollY = scrollHeight - viewportHeight;
-      if (expectedScrollY > maxScrollY) {
-        // Browser clamped the scroll, so there's overlap with previous screenshot
-        const overlap = expectedScrollY - maxScrollY;
+      if (targetScrollY > maxScrollY) {
+        const overlap = targetScrollY - maxScrollY;
         cropInfo = {
           yOffset: overlap * devicePixelRatio,
           height: (viewportHeight - overlap) * devicePixelRatio,
@@ -239,7 +284,7 @@ async function captureFullPage(tabId) {
       viewportHeight: viewportHeight * devicePixelRatio,
     });
 
-    // Send progress to popup (if it's still open)
+    // Send progress to popup (if still open)
     try {
       chrome.runtime.sendMessage({
         action: "captureProgress",
@@ -251,16 +296,25 @@ async function captureFullPage(tabId) {
     }
   }
 
-  // Scroll back to top
+  // Clean up: remove injected style, scroll back to top
   await chrome.scripting.executeScript({
     target: { tabId },
-    func: () => window.scrollTo(0, 0),
+    func: () => {
+      const s = document.getElementById("__scroll_capture_style__");
+      if (s) s.remove();
+      window.scrollTo(0, 0);
+    },
   });
 
   // Store captured data
   capturedData = {
     screenshots,
-    pageInfo,
+    pageInfo: {
+      scrollHeight,
+      viewportHeight,
+      viewportWidth,
+      devicePixelRatio,
+    },
     title,
   };
 
