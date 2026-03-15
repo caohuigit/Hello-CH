@@ -1,12 +1,15 @@
 {
   "manifest_version": 3,
   "name": "网页滚动截图转PDF",
-  "version": "1.0.0",
-  "description": "对网页进行滚动截图，并将截图合并转换为PDF文件",
+  "version": "2.0.0",
+  "description": "对网页进行滚动截图，预览后可保存为长图或双层PDF（含可搜索文字）",
   "permissions": [
     "activeTab",
     "scripting"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "action": {
     "default_popup": "popup.html",
     "default_icon": {

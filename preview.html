@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>截图预览</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #e8e8e8;
+      color: #333;
+    }
+
+    .toolbar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 100;
+      background: #fff;
+      border-bottom: 1px solid #ddd;
+      padding: 12px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+
+    .toolbar-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #333;
+    }
+
+    .toolbar-actions {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .btn {
+      padding: 8px 20px;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .btn-save-img {
+      background: #34a853;
+      color: #fff;
+    }
+
+    .btn-save-img:hover:not(:disabled) { background: #2d8f47; }
+
+    .btn-save-pdf {
+      background: #1a73e8;
+      color: #fff;
+    }
+
+    .btn-save-pdf:hover:not(:disabled) { background: #1557b0; }
+
+    .toolbar-status {
+      font-size: 13px;
+      color: #666;
+    }
+
+    .preview-container {
+      margin-top: 60px;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .screenshot-wrapper {
+      background: #fff;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+      margin-bottom: 2px;
+      line-height: 0;
+    }
+
+    .screenshot-wrapper img {
+      display: block;
+      width: 100%;
+      max-width: 900px;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 60px;
+      font-size: 16px;
+      color: #999;
+    }
+
+    .page-info {
+      margin-top: 16px;
+      text-align: center;
+      font-size: 13px;
+      color: #999;
+      padding-bottom: 24px;
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <div class="toolbar-title" id="toolbarTitle">截图预览</div>
+    <div class="toolbar-actions">
+      <span class="toolbar-status" id="toolbarStatus"></span>
+      <button class="btn btn-save-img" id="saveImgBtn" disabled>保存为长图</button>
+      <button class="btn btn-save-pdf" id="savePdfBtn" disabled>保存为双层PDF</button>
+    </div>
+  </div>
+  <div class="preview-container" id="previewContainer">
+    <div class="loading" id="loadingMsg">正在加载截图数据...</div>
+  </div>
+  <script src="lib/jspdf.umd.min.js"></script>
+  <script src="preview.js"></script>
+</body>
+</html>

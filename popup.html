@@ -3,14 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
 
     body {
-      width: 320px;
+      width: 300px;
       padding: 20px;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       background: #f8f9fa;
@@ -18,7 +14,7 @@
     }
 
     h1 {
-      font-size: 16px;
+      font-size: 15px;
       text-align: center;
       margin-bottom: 16px;
       color: #1a73e8;
@@ -41,14 +37,8 @@
       color: #fff;
     }
 
-    .btn-primary:hover {
-      background: #1557b0;
-    }
-
-    .btn-primary:disabled {
-      background: #a0c4ff;
-      cursor: not-allowed;
-    }
+    .btn-primary:hover { background: #1557b0; }
+    .btn-primary:disabled { background: #a0c4ff; cursor: not-allowed; }
 
     #status {
       margin-top: 12px;
@@ -67,9 +57,7 @@
       display: none;
     }
 
-    .progress-bar.active {
-      display: block;
-    }
+    .progress-bar.active { display: block; }
 
     .progress-bar-inner {
       height: 100%;
@@ -78,16 +66,23 @@
       transition: width 0.3s;
       width: 0%;
     }
+
+    .hint {
+      margin-top: 10px;
+      font-size: 11px;
+      color: #999;
+      text-align: center;
+    }
   </style>
 </head>
 <body>
-  <h1>📸 滚动截图转PDF</h1>
+  <h1>滚动截图工具</h1>
   <button id="captureBtn" class="btn btn-primary">开始截图</button>
   <div class="progress-bar" id="progressBar">
     <div class="progress-bar-inner" id="progressInner"></div>
   </div>
   <div id="status"></div>
-  <script src="lib/jspdf.umd.min.js"></script>
+  <div class="hint">截图完成后将打开预览页面</div>
   <script src="popup.js"></script>
 </body>
 </html>
